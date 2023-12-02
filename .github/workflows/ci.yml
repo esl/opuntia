@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: OTP ${{matrix.otp_vsn}}
+    strategy:
+      matrix:
+        otp_vsn: ['26.1', '25.3', '24.3']
+        rebar_vsn: ['3.22.0']
+    runs-on: 'ubuntu-22.04'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp_vsn }}
+          rebar3-version: ${{ matrix.rebar_vsn }}
+      - uses: actions/cache@v3
+        name: Cache
+        with:
+          path: _build
+          key: ${{ runner.os }}-build-${{ matrix.otp_vsn }}-${{ hashFiles(format('rebar.lock')) }}-1
+          restore-keys: ${{ runner.os }}-build-${{ matrix.otp_vsn }}-1-
+      - run: rebar3 as test compile
+      - run: rebar3 do xref, dialyzer
+        if: ${{ matrix.otp_vsn == '26.1' }}
+      - run: rebar3 ct --cover
+      - run: rebar3 cover
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v3
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
