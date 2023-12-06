@@ -31,8 +31,8 @@ jobs:
       - run: rebar3 as test compile
       - run: rebar3 do xref, dialyzer
         if: ${{ matrix.otp_vsn == '26.1' }}
-      - run: rebar3 ct --cover
-      - run: rebar3 cover
+      - run: rebar3 do ct --cover
+      - run: rebar3 as test codecov analyze
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v3
         env:
