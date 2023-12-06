@@ -12,6 +12,7 @@
          init_per_testcase/2,
          end_per_testcase/2]).
 
+-include_lib("stdlib/include/assert.hrl").
 -include_lib("proper/include/proper.hrl").
 
 all() ->
@@ -23,6 +24,7 @@ groups() ->
     [
      {throughput_throttle, [parallel],
       [
+       run_shaper_with_zero_does_not_shape,
        run_basic_shaper_property
       ]}
     ].
@@ -53,6 +55,18 @@ end_per_testcase(_TestCase, _Config) ->
 %%%===================================================================
 %%% Individual Test Cases (from groups() definition)
 %%%===================================================================
+
+run_shaper_with_zero_does_not_shape(_) ->
+    Prop = ?FORALL(
+              TokensToSpend,
+              integer(1, 9999),
+              begin
+                  Shaper = opuntia:new(0),
+                  {TimeUs, _LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
+                  TimeMs = erlang:convert_time_unit(TimeUs, microsecond, millisecond),
+                  0 =< TimeMs
+              end),
+    run_prop(?FUNCTION_NAME, Prop, 100, 1).
 
 run_basic_shaper_property(_) ->
     Prop = ?FORALL(
