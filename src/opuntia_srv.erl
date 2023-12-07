@@ -117,7 +117,7 @@ find_or_create_shaper(#opuntia_state{shapers = Shapers}, Key, Config) ->
         _ -> create_new_from_config(Config)
     end.
 
-create_new_from_config(N) when is_integer(N), N >= 0 ->
+create_new_from_config(N) when is_number(N), N >= 0 ->
     opuntia:new(N);
 create_new_from_config(Config) when is_function(Config, 0) ->
     create_new_from_config(Config()).
