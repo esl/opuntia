@@ -29,6 +29,7 @@
 -type args() :: #{max_delay => opuntia:rate(),
                   gc_interval => seconds(),
                   ttl => seconds()}.
+-type maybe_rate() :: fun(() -> opuntia:rate() | opuntia:rate()).
 
 %% API Function Definitions
 -spec start_link(name(), args()) -> ignore | {error, _} | {ok, pid()}.
@@ -36,7 +37,7 @@ start_link(Name, Args) ->
     gen_server:start_link(?MODULE, {Name, Args}, []).
 
 %% @doc Shapes the caller from executing the action
--spec wait(gen_server:server_ref(), key(), opuntia:tokens(), opuntia:rate()) ->
+-spec wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
     continue | {error, max_delay_reached}.
 wait(Shaper, Key, Tokens, Config) ->
     gen_server:call(Shaper, {wait, Key, Tokens, Config}).
@@ -107,8 +108,13 @@ code_change(_OldVsn, State, _Extra) ->
 find_or_create_shaper(#opuntia_state{shapers = Shapers}, Key, Config) ->
     case Shapers of
         #{Key := Shaper} -> Shaper;
-        _ -> opuntia:new(Config)
+        _ -> create_new_from_config(Config)
     end.
+
+create_new_from_config(N) when is_integer(N), N >= 0 ->
+    opuntia:new(N);
+create_new_from_config(Config) when is_function(Config, 0) ->
+    create_new_from_config(Config()).
 
 save_shaper(#opuntia_state{shapers = Shapers} = State, Key, Shaper) ->
     State#opuntia_state{shapers = maps:put(Key, Shaper, Shapers)}.
