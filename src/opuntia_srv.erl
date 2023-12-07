@@ -8,7 +8,7 @@
 -include("opuntia.hrl").
 
 %% API Function Exports
--export([start_link/2, wait/4, reset_shapers/1]).
+-export([start_link/2, wait/4, request_wait/4, reset_shapers/1]).
 
 %% gen_server Function Exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
@@ -29,7 +29,7 @@
 -type args() :: #{max_delay => opuntia:delay(),
                   gc_interval => seconds(),
                   ttl => seconds()}.
--type maybe_rate() :: fun(() -> opuntia:rate() | opuntia:rate()).
+-type maybe_rate() :: fun(() -> opuntia:rate()) | opuntia:rate().
 
 %% API Function Definitions
 -spec start_link(name(), args()) -> ignore | {error, _} | {ok, pid()}.
@@ -41,6 +41,11 @@ start_link(Name, Args) ->
     continue | {error, max_delay_reached}.
 wait(Shaper, Key, Tokens, Config) ->
     gen_server:call(Shaper, {wait, Key, Tokens, Config}, infinity).
+
+-spec request_wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
+    gen_server:request_id().
+request_wait(Shaper, Key, Tokens, Config) ->
+    gen_server:send_request(Shaper, {wait, Key, Tokens, Config}).
 
 %% @doc Ask server to forget its shapers
 reset_shapers(ProcName) ->

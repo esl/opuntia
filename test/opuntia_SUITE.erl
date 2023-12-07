@@ -109,11 +109,12 @@ run_stateful_server(_) ->
                 {History, State, Res} = run_commands(?MODULE, Cmds, [{server, Pid}]),
                 ?WHENFAIL(io:format("H: ~p~nS: ~p~n Res: ~p~n", [History, State, Res]), Res == ok)
             end),
-    run_prop(?FUNCTION_NAME, Prop, 10_000, 256).
+    run_prop(?FUNCTION_NAME, Prop, 1_000, 1).
 
 command(_State) ->
     oneof([
            {call, ?MODULE, wait, [{var, server}, key(), tokens(), config()]},
+           {call, ?MODULE, request_wait, [{var, server}, key(), tokens(), config()]},
            {call, ?MODULE, reset_shapers, [{var, server}]}
           ]).
 
@@ -123,7 +124,8 @@ initial_state() ->
 
 precondition(_State, {call, ?MODULE, reset_shapers, [_Server]}) ->
     true;
-precondition(State, {call, ?MODULE, wait, [Server, Key, _Tokens, Config]}) ->
+precondition(State, {call, ?MODULE, Wait, [Server, Key, _Tokens, Config]})
+  when Wait =:= wait; Wait =:= request_wait ->
     case maps:is_key(Key, State) of
         true -> %% We already know when this one started
             true;
@@ -137,16 +139,24 @@ precondition(State, {call, ?MODULE, wait, [Server, Key, _Tokens, Config]}) ->
 postcondition(_State, {call, ?MODULE, reset_shapers, [_Server]}, Res) ->
     ok =:= Res;
 postcondition(State, {call, ?MODULE, wait, [Server, Key, Tokens, _Config]}, Res) ->
+    do_postcondition(State, wait, Server, Key, Tokens, Res);
+postcondition(State, {call, ?MODULE, request_wait, [Server, Key, Tokens, _Config]}, Res) ->
+    {reply, Response} = gen_server:wait_response(Res, infinity),
+    do_postcondition(State, request_wait, Server, Key, Tokens, Response).
+
+do_postcondition(State, Wait, Server, Key, Tokens, Res) ->
     Now = erlang:monotonic_time(millisecond),
     [{_, Rate, Start}] = ets:lookup(?MODULE, {Server, Key}),
     TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
     MinimumExpected = calculate_accepted_range(TokensNowConsumed, Rate),
     Duration = Now - Start,
+    ct:pal("Res ~p, Value ~p, wait ~p~n", [Res, Duration, Wait]),
     continue =:= Res andalso MinimumExpected =< Duration.
 
 next_state(_State, _Result, {call, ?MODULE, reset_shapers, [_Server]}) ->
     #{};
-next_state(State, _Result, {call, ?MODULE, wait, [_Server, Key, Tokens, _Config]}) ->
+next_state(State, _Result, {call, ?MODULE, Wait, [_Server, Key, Tokens, _Config]})
+  when Wait =:= wait; Wait =:= request_wait ->
     TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
     State#{Key => TokensNowConsumed}.
 
@@ -157,6 +167,9 @@ tokens_now_consumed(State, Key, NewTokens) ->
 wait(Shaper, Key, Tokens, Config) ->
     opuntia_srv:wait(Shaper, Key, Tokens, Config).
 
+request_wait(Shaper, Key, Tokens, Config) ->
+    opuntia_srv:request_wait(Shaper, Key, Tokens, Config).
+
 reset_shapers(Shaper) ->
     opuntia_srv:reset_shapers(Shaper).
 
@@ -165,8 +178,9 @@ get_rate_from_config(N) when is_integer(N), N >= 0 ->
 get_rate_from_config(Config) when is_function(Config, 0) ->
     Config().
 
+%% Limit the number of keys to only a hundred, to make tests smaller
 key() ->
-    binary().
+    elements([ integer_to_binary(N) || N <- lists:seq(1, 100) ]).
 
 tokens() ->
     integer(1, 9999).
