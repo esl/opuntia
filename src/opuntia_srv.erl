@@ -54,7 +54,7 @@ init({Name, Args}) ->
     State = #opuntia_state{name = Name, max_delay = MaxDelay, gc_ttl = GCTTL, gc_time = GCInt},
     {ok, schedule_cleanup(State)}.
 
-handle_call({wait, Tokens, Key, Config}, From,
+handle_call({wait, Key, Tokens, Config}, From,
             #opuntia_state{name = Name, max_delay = MaxDelayMs} = State) ->
     Shaper = find_or_create_shaper(State, Key, Config),
     {UpdatedShaper, Delay} = opuntia:update(Shaper, Tokens),
