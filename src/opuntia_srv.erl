@@ -11,12 +11,12 @@
 -export([start_link/2, wait/4, reset_shapers/1]).
 
 %% gen_server Function Exports
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 %% Record definitions
 -record(opuntia_state, {
           name :: name(),
-          max_delay :: opuntia:rate(), %% Maximum amount of time units to wait
+          max_delay :: opuntia:delay(), %% Maximum amount of time units to wait
           gc_ttl :: non_neg_integer(), %% How many seconds to store each shaper
           gc_time :: non_neg_integer(), %% How often to run the gc
           gc_ref :: undefined | reference(),
@@ -26,7 +26,7 @@
 -type name() :: atom().
 -type key() :: term().
 -type seconds() :: non_neg_integer().
--type args() :: #{max_delay => opuntia:rate(),
+-type args() :: #{max_delay => opuntia:delay(),
                   gc_interval => seconds(),
                   ttl => seconds()}.
 -type maybe_rate() :: fun(() -> opuntia:rate() | opuntia:rate()).
@@ -40,11 +40,11 @@ start_link(Name, Args) ->
 -spec wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
     continue | {error, max_delay_reached}.
 wait(Shaper, Key, Tokens, Config) ->
-    gen_server:call(Shaper, {wait, Key, Tokens, Config}).
+    gen_server:call(Shaper, {wait, Key, Tokens, Config}, infinity).
 
 %% @doc Ask server to forget its shapers
 reset_shapers(ProcName) ->
-    gen_server:call(ProcName, reset_shapers).
+    gen_server:call(ProcName, reset_shapers, infinity).
 
 %% gen_server Function Definitions
 -spec init({name(), args()}) -> {ok, opuntia_state()}.
@@ -95,12 +95,6 @@ handle_info(Info, #opuntia_state{name = Name} = State) ->
     telemetry:execute([opuntia, unknown_request, Name], #{value => 1}, #{msg => Info, type => info}),
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
@@ -122,10 +116,9 @@ save_shaper(#opuntia_state{shapers = Shapers} = State, Key, Shaper) ->
 cleanup(State = #opuntia_state{name = Name, shapers = Shapers, gc_ttl = TTL}) ->
     telemetry:execute([opuntia, cleanup, Name], #{}, #{}),
     TimestampThreshold = erlang:system_time(second) - TTL,
-    F = fun(_, #token_bucket{last_update = ATime}) ->
-                Min = erlang:convert_time_unit(TimestampThreshold, second, millisecond),
-                ATime > Min
-        end,
+    Min = erlang:convert_time_unit(TimestampThreshold, second, millisecond),
+    F = fun(_, #token_bucket{last_update = ATime}) -> ATime > Min;
+           (_, none) -> false end,
     RemainingShapers = maps:filter(F, Shapers),
     State#opuntia_state{shapers = RemainingShapers}.
 

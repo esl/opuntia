@@ -12,8 +12,8 @@
          init_per_testcase/2,
          end_per_testcase/2]).
 
--include_lib("stdlib/include/assert.hrl").
 -include_lib("proper/include/proper.hrl").
+-include_lib("common_test/include/ct.hrl").
 
 all() ->
     [
@@ -25,13 +25,15 @@ groups() ->
      {throughput_throttle, [parallel],
       [
        run_shaper_with_zero_does_not_shape,
-       run_basic_shaper_property
+       run_basic_shaper_property,
+       run_stateful_server
       ]}
     ].
 
 %%%===================================================================
 %%% Overall setup/teardown
 %%%===================================================================
+
 init_per_suite(Config) ->
     ct:pal("Online schedulers ~p~n", [erlang:system_info(schedulers_online)]),
     application:ensure_all_started(telemetry),
@@ -46,11 +48,21 @@ init_per_group(_, Config) ->
 end_per_group(_Groupname, _Config) ->
     ok.
 
+init_per_testcase(run_stateful_server, Config) ->
+    [{{pid, run_stateful_server}, spawn(fun keep_table/0)} | Config];
 init_per_testcase(_TestCase, Config) ->
     Config.
 
+end_per_testcase(run_stateful_server, Config) ->
+    Pid = ?config({pid, run_stateful_server}, Config),
+    Pid ! clean_table;
 end_per_testcase(_TestCase, _Config) ->
     ok.
+
+keep_table() ->
+    ets:new(?MODULE, [named_table, set, public,
+                      {write_concurrency, true}, {read_concurrency, true}]),
+    receive Msg -> Msg end.
 
 %%%===================================================================
 %%% Individual Test Cases (from groups() definition)
@@ -59,7 +71,7 @@ end_per_testcase(_TestCase, _Config) ->
 run_shaper_with_zero_does_not_shape(_) ->
     Prop = ?FORALL(
               TokensToSpend,
-              integer(1, 9999),
+              tokens(),
               begin
                   Shaper = opuntia:new(0),
                   {TimeUs, _LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
@@ -71,7 +83,7 @@ run_shaper_with_zero_does_not_shape(_) ->
 run_basic_shaper_property(_) ->
     Prop = ?FORALL(
               {TokensToSpend, RatePerMs},
-              {integer(1, 9999), integer(1, 9999)},
+              {tokens(), rate()},
               begin
                   Shaper = opuntia:new(RatePerMs),
                   {TimeUs, _LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
@@ -82,8 +94,94 @@ run_basic_shaper_property(_) ->
                                     [TokensToSpend, RatePerMs, TimeMs, MinimumExpected, Val]),
                   Val
               end),
-    run_prop(?FUNCTION_NAME, Prop).
+    run_prop(?FUNCTION_NAME, Prop, 100_000, 256).
 
+%%%===================================================================
+%% Server stateful property
+%%%===================================================================
+
+run_stateful_server(_) ->
+    Prop =
+        ?FORALL(Cmds, commands(?MODULE),
+            begin
+                Config =  #{max_delay => 99999, gc_interval => 1},
+                {ok, Pid} = opuntia_srv:start_link(?MODULE, Config),
+                {History, State, Res} = run_commands(?MODULE, Cmds, [{server, Pid}]),
+                ?WHENFAIL(io:format("H: ~p~nS: ~p~n Res: ~p~n", [History, State, Res]), Res == ok)
+            end),
+    run_prop(?FUNCTION_NAME, Prop, 10_000, 256).
+
+command(_State) ->
+    oneof([
+           {call, ?MODULE, wait, [{var, server}, key(), tokens(), config()]},
+           {call, ?MODULE, reset_shapers, [{var, server}]}
+          ]).
+
+
+initial_state() ->
+    #{}.
+
+precondition(_State, {call, ?MODULE, reset_shapers, [_Server]}) ->
+    true;
+precondition(State, {call, ?MODULE, wait, [Server, Key, _Tokens, Config]}) ->
+    case maps:is_key(Key, State) of
+        true -> %% We already know when this one started
+            true;
+        false -> %% Track start for this key
+            Now = erlang:monotonic_time(millisecond),
+            Rate = get_rate_from_config(Config),
+            ets:insert(?MODULE, {{Server, Key}, Rate, Now}),
+            true
+    end.
+
+postcondition(_State, {call, ?MODULE, reset_shapers, [_Server]}, Res) ->
+    ok =:= Res;
+postcondition(State, {call, ?MODULE, wait, [Server, Key, Tokens, _Config]}, Res) ->
+    Now = erlang:monotonic_time(millisecond),
+    [{_, Rate, Start}] = ets:lookup(?MODULE, {Server, Key}),
+    TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
+    MinimumExpected = calculate_accepted_range(TokensNowConsumed, Rate),
+    Duration = Now - Start,
+    continue =:= Res andalso MinimumExpected =< Duration.
+
+next_state(_State, _Result, {call, ?MODULE, reset_shapers, [_Server]}) ->
+    #{};
+next_state(State, _Result, {call, ?MODULE, wait, [_Server, Key, Tokens, _Config]}) ->
+    TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
+    State#{Key => TokensNowConsumed}.
+
+tokens_now_consumed(State, Key, NewTokens) ->
+    TokensConsumedSoFar = maps:get(Key, State, 0),
+    TokensConsumedSoFar + NewTokens.
+
+wait(Shaper, Key, Tokens, Config) ->
+    opuntia_srv:wait(Shaper, Key, Tokens, Config).
+
+reset_shapers(Shaper) ->
+    opuntia_srv:reset_shapers(Shaper).
+
+get_rate_from_config(N) when is_integer(N), N >= 0 ->
+    N;
+get_rate_from_config(Config) when is_function(Config, 0) ->
+    Config().
+
+key() ->
+    binary().
+
+tokens() ->
+    integer(1, 9999).
+
+config() ->
+    union([0, rate(), function(0, rate())]).
+
+rate() ->
+    integer(1, 9999).
+
+%%%===================================================================
+%% Helpers
+%%%===================================================================
+calculate_accepted_range(_, 0) ->
+    0;
 calculate_accepted_range(TokensToSpend, RatePerMs) when TokensToSpend =< RatePerMs ->
     0;
 calculate_accepted_range(TokensToSpend, RatePerMs) ->
@@ -97,15 +195,6 @@ run_shaper(Shaper, TokensLeft) ->
     {NewShaper, DelayMs} = opuntia:update(Shaper, TokensConsumed),
     timer:sleep(DelayMs),
     run_shaper(NewShaper, TokensLeft - TokensConsumed).
-
-
-
-
-run_prop(PropName, Property) ->
-    run_prop(PropName, Property, 100_000).
-
-run_prop(PropName, Property, NumTests) ->
-    run_prop(PropName, Property, NumTests, 256).
 
 run_prop(PropName, Property, NumTests, WorkersPerScheduler) ->
     Opts = [quiet, noshrink, long_result, {start_size, 2}, {numtests, NumTests},
