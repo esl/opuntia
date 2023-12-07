@@ -1,6 +1,4 @@
-%%%-------------------------------------------------------------------
 %%% @doc Shared shapers.
-%%%-------------------------------------------------------------------
 -module(opuntia_srv).
 
 -behaviour(gen_server).
@@ -22,7 +20,7 @@
           gc_ref :: undefined | reference(),
           shapers = #{} :: #{key() := opuntia:shaper()}
          }).
--type opuntia_state() :: #opuntia_state{}.
+-type opuntia_state() :: #opuntia_state{}. %% @private
 -type name() :: atom().
 -type key() :: term().
 -type seconds() :: non_neg_integer().
@@ -31,26 +29,32 @@
                   ttl => seconds()}.
 -type maybe_rate() :: fun(() -> opuntia:rate()) | opuntia:rate().
 
-%% API Function Definitions
+%% @doc starts a shaper server
 -spec start_link(name(), args()) -> ignore | {error, _} | {ok, pid()}.
 start_link(Name, Args) ->
     gen_server:start_link(?MODULE, {Name, Args}, []).
 
 %% @doc Shapes the caller from executing the action
+%%
+%% This will do an actual blocking `gen_server:call/3'
 -spec wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
     continue | {error, max_delay_reached}.
 wait(Shaper, Key, Tokens, Config) ->
     gen_server:call(Shaper, {wait, Key, Tokens, Config}, infinity).
 
+%% @doc Shapes the caller from executing the action, asynchronously
+%%
+%% This will do a `gen_server:send_request/2'. Usual pattern applies to receive the matching continue.
 -spec request_wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
     gen_server:request_id().
 request_wait(Shaper, Key, Tokens, Config) ->
     gen_server:send_request(Shaper, {wait, Key, Tokens, Config}).
 
-%% @doc Ask server to forget its shapers
+%% @doc Ask server to forget all its shapers
 reset_shapers(ProcName) ->
     gen_server:call(ProcName, reset_shapers, infinity).
 
+%% @private
 %% gen_server Function Definitions
 -spec init({name(), args()}) -> {ok, opuntia_state()}.
 init({Name, Args}) ->
@@ -60,6 +64,7 @@ init({Name, Args}) ->
     State = #opuntia_state{name = Name, max_delay = MaxDelay, gc_ttl = GCTTL, gc_time = GCInt},
     {ok, schedule_cleanup(State)}.
 
+%% @private
 handle_call({wait, Key, Tokens, Config}, From,
             #opuntia_state{name = Name, max_delay = MaxDelayMs} = State) ->
     Shaper = find_or_create_shaper(State, Key, Config),
@@ -90,10 +95,12 @@ handle_call(Msg, From, #opuntia_state{name = Name} = State) ->
     telemetry:execute([opuntia, unknown_request, Name], #{value => 1}, #{msg => Msg, from => From, type => call}),
     {reply, unknown_request, State}.
 
+%% @private
 handle_cast(Msg, #opuntia_state{name = Name} = State) ->
     telemetry:execute([opuntia, unknown_request, Name], #{value => 1}, #{msg => Msg, type => cast}),
     {noreply, State}.
 
+%% @private
 handle_info({timeout, TRef, cleanup}, #opuntia_state{gc_ref = TRef} = State) ->
     {noreply, schedule_cleanup(cleanup(State))};
 handle_info(Info, #opuntia_state{name = Name} = State) ->

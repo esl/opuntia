@@ -1,11 +1,8 @@
-%%%-------------------------------------------------------------------
-%% @doc `opuntia', traffic shapers for erlang and elixir
+%% @doc `opuntia', traffic shapers for Erlang and Elixir
 %%
-%% This module implements a *Token Bucket* traffic shaping algorithm.
-%% The time unit of measurement is millisecond, as this is the unit receives and timers use.
-%% For more information, see the README, and the function documentation.
+%% This module implements the token bucket traffic shaping algorithm.
+%% The time unit of measurement is millisecond, as this is the unit receives and timers use in the BEAM.
 %% @end
-%%%-------------------------------------------------------------------
 -module(opuntia).
 
 -export([new/1, update/2]).
@@ -29,6 +26,7 @@ new(MaxRatePerMs) ->
                   last_update = erlang:monotonic_time(millisecond)}.
 
 %% @doc Update shaper and return possible waiting time.
+%%
 %% This function takes the current shaper state, and the number of tokens that have been consumed,
 %% and returns a tuple containing the new shaper state, and a possibly non-zero number of
 %% unit times to wait if more tokens that the shaper allows were consumed.
