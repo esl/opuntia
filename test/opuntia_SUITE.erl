@@ -26,6 +26,7 @@ groups() ->
      {throughput_throttle, [sequence],
       [
        run_shaper_with_zero_does_not_shape,
+       run_shaper_without_consuming_does_not_delay,
        run_basic_shaper_property,
        run_stateful_server
       ]}
@@ -75,6 +76,14 @@ run_shaper_with_zero_does_not_shape(_) ->
                   {TimeUs, _LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
                   TimeMs = erlang:convert_time_unit(TimeUs, microsecond, millisecond),
                   0 =< TimeMs
+              end),
+    run_prop(?FUNCTION_NAME, Prop, 1000, 2).
+
+run_shaper_without_consuming_does_not_delay(_) ->
+    Prop = ?FORALL(Rate, rate(),
+              begin
+                  {_, Delay} = opuntia:update(opuntia:new(Rate), 0),
+                  0 =:= Delay
               end),
     run_prop(?FUNCTION_NAME, Prop, 1000, 2).
 
