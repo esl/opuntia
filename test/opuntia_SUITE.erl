@@ -110,7 +110,7 @@ run_stateful_server(_) ->
     Prop =
         ?FORALL(Cmds, commands(?MODULE),
             begin
-                Config =  #{max_delay => 99999, gc_interval => 1},
+                Config =  #{max_delay => 99999, cleanup_interval => 1},
                 {ok, Pid} = opuntia_srv:start_link(?MODULE, Config),
                 {History, State, Res} = run_commands(?MODULE, Cmds, [{server, Pid}]),
                 ?WHENFAIL(io:format("H: ~p~nS: ~p~n Res: ~p~n", [History, State, Res]), Res == ok)

@@ -15,9 +15,9 @@
 -record(opuntia_state, {
           name :: name(),
           max_delay :: opuntia:delay(), %% Maximum amount of time units to wait
-          gc_ttl :: non_neg_integer(), %% How many seconds to store each shaper
-          gc_time :: non_neg_integer(), %% How often to run the gc
-          gc_ref :: undefined | reference(),
+          cleanup_ttl :: non_neg_integer(), %% How many seconds to store each shaper
+          cleanup_time :: non_neg_integer(), %% How often to run the gc
+          cleanup_ref :: undefined | reference(),
           shapers = #{} :: #{key() := opuntia:shaper()}
          }).
 -type opuntia_state() :: #opuntia_state{}. %% @private
@@ -25,7 +25,7 @@
 -type key() :: term().
 -type seconds() :: non_neg_integer().
 -type args() :: #{max_delay => opuntia:delay(),
-                  gc_interval => seconds(),
+                  cleanup_interval => seconds(),
                   ttl => seconds()}.
 -type maybe_rate() :: fun(() -> opuntia:rate()) | opuntia:rate().
 
@@ -59,9 +59,10 @@ reset_shapers(ProcName) ->
 -spec init({name(), args()}) -> {ok, opuntia_state()}.
 init({Name, Args}) ->
     MaxDelay = maps:get(max_delay, Args, 3000),
-    GCInt = timer:seconds(maps:get(gc_interval, Args, 30)),
+    GCInt = timer:seconds(maps:get(cleanup_interval, Args, 30)),
     GCTTL = maps:get(ttl, Args, 120),
-    State = #opuntia_state{name = Name, max_delay = MaxDelay, gc_ttl = GCTTL, gc_time = GCInt},
+    State = #opuntia_state{name = Name, max_delay = MaxDelay,
+                           cleanup_ttl = GCTTL, cleanup_time = GCInt},
     {ok, schedule_cleanup(State)}.
 
 %% @private
@@ -101,7 +102,7 @@ handle_cast(Msg, #opuntia_state{name = Name} = State) ->
     {noreply, State}.
 
 %% @private
-handle_info({timeout, TRef, cleanup}, #opuntia_state{gc_ref = TRef} = State) ->
+handle_info({timeout, TRef, cleanup}, #opuntia_state{cleanup_ref = TRef} = State) ->
     {noreply, schedule_cleanup(cleanup(State))};
 handle_info(Info, #opuntia_state{name = Name} = State) ->
     telemetry:execute([opuntia, unknown_request, Name], #{value => 1}, #{msg => Info, type => info}),
@@ -125,7 +126,7 @@ create_new_from_config(Config) when is_function(Config, 0) ->
 save_shaper(#opuntia_state{shapers = Shapers} = State, Key, Shaper) ->
     State#opuntia_state{shapers = maps:put(Key, Shaper, Shapers)}.
 
-cleanup(State = #opuntia_state{name = Name, shapers = Shapers, gc_ttl = TTL}) ->
+cleanup(State = #opuntia_state{name = Name, shapers = Shapers, cleanup_ttl = TTL}) ->
     telemetry:execute([opuntia, cleanup, Name], #{}, #{}),
     TimestampThreshold = erlang:system_time(second) - TTL,
     Min = erlang:convert_time_unit(TimestampThreshold, second, millisecond),
@@ -134,15 +135,15 @@ cleanup(State = #opuntia_state{name = Name, shapers = Shapers, gc_ttl = TTL}) ->
     RemainingShapers = maps:filter(F, Shapers),
     State#opuntia_state{shapers = RemainingShapers}.
 
-schedule_cleanup(#opuntia_state{gc_time = 0} = State) ->
+schedule_cleanup(#opuntia_state{cleanup_time = 0} = State) ->
     State;
-schedule_cleanup(#opuntia_state{gc_time = GCInt} = State) ->
+schedule_cleanup(#opuntia_state{cleanup_time = GCInt} = State) ->
     TRef = erlang:start_timer(GCInt, self(), cleanup),
-    State#opuntia_state{gc_ref = TRef}.
+    State#opuntia_state{cleanup_ref = TRef}.
 
 %% @doc It is a small hack
-%% This function calls this in more efficient way:
+%% This function calls this in a more efficient way:
 %% timer:apply_after(DelayMs, gen_server, reply, [From, Reply]).
--spec reply_after(opuntia:rate(), {atom() | pid(), _}, continue) -> reference().
+-spec reply_after(opuntia:delay(), {atom() | pid(), _}, continue) -> reference().
 reply_after(DelayMs, {Pid, Tag}, Reply) ->
     erlang:send_after(DelayMs, Pid, {Tag, Reply}).
