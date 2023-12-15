@@ -12,6 +12,7 @@
          init_per_testcase/2,
          end_per_testcase/2]).
 
+-include_lib("stdlib/include/assert.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("common_test/include/ct.hrl").
 
@@ -22,7 +23,7 @@ all() ->
 
 groups() ->
     [
-     {throughput_throttle, [parallel],
+     {throughput_throttle, [sequence],
       [
        run_shaper_with_zero_does_not_shape,
        run_basic_shaper_property,
@@ -35,7 +36,6 @@ groups() ->
 %%%===================================================================
 
 init_per_suite(Config) ->
-    ct:pal("Online schedulers ~p~n", [erlang:system_info(schedulers_online)]),
     application:ensure_all_started(telemetry),
     Config.
 
@@ -69,16 +69,14 @@ keep_table() ->
 %%%===================================================================
 
 run_shaper_with_zero_does_not_shape(_) ->
-    Prop = ?FORALL(
-              TokensToSpend,
-              tokens(),
+    Prop = ?FORALL(TokensToSpend, tokens(),
               begin
                   Shaper = opuntia:new(0),
                   {TimeUs, _LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
                   TimeMs = erlang:convert_time_unit(TimeUs, microsecond, millisecond),
                   0 =< TimeMs
               end),
-    run_prop(?FUNCTION_NAME, Prop, 100, 1).
+    run_prop(?FUNCTION_NAME, Prop, 1000, 2).
 
 run_basic_shaper_property(_) ->
     Prop = ?FORALL(
@@ -94,7 +92,7 @@ run_basic_shaper_property(_) ->
                                     [TokensToSpend, RatePerMs, TimeMs, MinimumExpected, Val]),
                   Val
               end),
-    run_prop(?FUNCTION_NAME, Prop, 100_000, 256).
+    run_prop(?FUNCTION_NAME, Prop, 1000, 12).
 
 %%%===================================================================
 %% Server stateful property
@@ -109,7 +107,7 @@ run_stateful_server(_) ->
                 {History, State, Res} = run_commands(?MODULE, Cmds, [{server, Pid}]),
                 ?WHENFAIL(io:format("H: ~p~nS: ~p~n Res: ~p~n", [History, State, Res]), Res == ok)
             end),
-    run_prop(?FUNCTION_NAME, Prop, 1_000, 1).
+    run_prop(?FUNCTION_NAME, Prop, 1000, 2).
 
 command(_State) ->
     oneof([
@@ -211,9 +209,7 @@ run_shaper(Shaper, TokensLeft) ->
     run_shaper(NewShaper, TokensLeft - TokensConsumed).
 
 run_prop(PropName, Property, NumTests, WorkersPerScheduler) ->
-    Opts = [quiet, noshrink, long_result, {start_size, 2}, {numtests, NumTests},
+    Opts = [quiet, long_result, {start_size, 2}, {numtests, NumTests},
             {numworkers, WorkersPerScheduler * erlang:system_info(schedulers_online)}],
-    case proper:quickcheck(proper:conjunction([{PropName, Property}]), Opts) of
-        true -> ok;
-        Res -> ct:fail(Res)
-    end.
+    Res = proper:quickcheck(proper:conjunction([{PropName, Property}]), Opts),
+    ?assertEqual(true, Res).
