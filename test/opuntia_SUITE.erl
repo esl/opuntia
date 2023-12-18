@@ -96,7 +96,7 @@ run_basic_shaper_property(_) ->
                   {TimeUs, LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
                   MinimumExpectedUs = should_take_at_least(TokensToSpend, Shape, microsecond),
                   Val = (MinimumExpectedUs =< TimeUs),
-                  S = "ToConsume ~p, Shape ~p, TookThisLong ~p, CantBeFasterThan ~p, LastShaper ~p",
+                  S = "ToConsume ~p, Shape ~p, TookThisLong ~p, CantBeFasterThan ~p, ~nLastShaper ~p",
                   P = [TokensToSpend, Shape, TimeUs, MinimumExpectedUs, LastShaper],
                   success_or_log_and_return(Val, S, P)
               end),
