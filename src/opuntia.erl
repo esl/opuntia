@@ -60,7 +60,7 @@ new(0) ->
 new({MaximumTokens, Rate, TimeUnit})
   when ?NON_NEG_INT(MaximumTokens), ?NON_NEG_INT(Rate), ?TU(TimeUnit) ->
     #token_bucket_shaper{shape = {MaximumTokens, Rate, TimeUnit},
-                         available_tokens = 0,
+                         available_tokens = MaximumTokens,
                          last_update = erlang:monotonic_time(TimeUnit)}.
 
 %% @doc Update shaper and return possible waiting time.

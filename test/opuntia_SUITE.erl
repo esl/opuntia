@@ -224,10 +224,13 @@ convert_time_unit(Time, millisecond, second) -> Time / 1000;
 convert_time_unit(Time, second, microsecond) -> Time * 1000 * 1000;
 convert_time_unit(Time, second, millisecond) -> Time * 1000.
 
-%% If consuming at maximum speed, timewindow is never filled so we don't need to care for it
-should_take_at_least(Consumed, {_TimeWindow, Rate, TimeUnit}, Unit) ->
-    Expected = Consumed / Rate,
-    floor(convert_time_unit(Expected, TimeUnit, Unit)).
+should_take_at_least(Consumed, {MaximumTokens, Rate, TimeUnit}, Unit) ->
+    case Consumed - MaximumTokens of
+        ToThrottle when ToThrottle =< 0 -> 0;
+        ToThrottle ->
+            Expected = ToThrottle / Rate,
+            floor(convert_time_unit(Expected, TimeUnit, Unit))
+    end.
 
 run_shaper(Shaper, 0) ->
     Shaper;
