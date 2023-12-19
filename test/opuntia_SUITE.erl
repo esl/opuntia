@@ -25,6 +25,7 @@ groups() ->
     [
      {throughput_throttle, [sequence],
       [
+       simple_test_no_delay_is_needed,
        run_shaper_with_zero_does_not_shape,
        run_shaper_without_consuming_does_not_delay,
        run_basic_shaper_property,
@@ -68,6 +69,11 @@ keep_table() ->
 %%%===================================================================
 %%% Individual Test Cases (from groups() definition)
 %%%===================================================================
+
+simple_test_no_delay_is_needed(_) ->
+    FoldFun = fun(N, ShIn) -> {ShOut, 0} = opuntia:update(ShIn, N), ShOut end,
+    Shaper = opuntia:new(#{bucket_size => 100000, rate => 10000, start_full => true}),
+    lists:foldl(FoldFun, Shaper, lists:duplicate(10000, 1)).
 
 run_shaper_with_zero_does_not_shape(_) ->
     Prop = ?FORALL(TokensToSpend, tokens(),
