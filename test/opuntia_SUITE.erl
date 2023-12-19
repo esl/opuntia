@@ -88,19 +88,22 @@ run_shaper_without_consuming_does_not_delay(_) ->
     run_prop(?FUNCTION_NAME, Prop, 1000, 2).
 
 run_basic_shaper_property(_) ->
+    S = "ToConsume ~p, Shape ~p, CalculatedDelay ~p ms, in range [~p, ~p]ms, ~nLastShaper ~p,~nHistory ~p",
     Prop = ?FORALL(
               {TokensToSpend, Shape},
               {tokens(), shape()},
               begin
-                  Shaper = opuntia:new(Shape),
-                  {TimeUs, LastShaper} = timer:tc(fun run_shaper/2, [Shaper, TokensToSpend]),
-                  MinimumExpectedUs = should_take_at_least(TokensToSpend, Shape, microsecond),
-                  Val = (MinimumExpectedUs =< TimeUs),
-                  S = "ToConsume ~p, Shape ~p, TookThisLong ~p, CantBeFasterThan ~p, ~nLastShaper ~p",
-                  P = [TokensToSpend, Shape, TimeUs, MinimumExpectedUs, LastShaper],
-                  success_or_log_and_return(Val, S, P)
+                  {LastShaper, History, CalculatedDelay} = run_shaper(Shape, TokensToSpend),
+                  {CannotBeFasterThan, CannotBeSlowerThan} = should_take_in_range(Shape, TokensToSpend),
+                  Val = value_in_range(CalculatedDelay, CannotBeFasterThan, CannotBeSlowerThan),
+                  P = [TokensToSpend, Shape, CalculatedDelay, CannotBeFasterThan,
+                       CannotBeSlowerThan, LastShaper, History],
+                  success_or_log_and_return(Val andalso is_integer(CalculatedDelay), S, P)
               end),
-    run_prop(?FUNCTION_NAME, Prop, 1000, 12).
+    run_prop(?FUNCTION_NAME, Prop, 10000, 12).
+
+value_in_range(Val, Min, Max) ->
+    (Min =< Val) andalso (Val =< Max).
 
 %%%===================================================================
 %% Server stateful property
@@ -115,7 +118,7 @@ run_stateful_server(_) ->
                 {History, State, Res} = run_commands(?MODULE, Cmds, [{server, Pid}]),
                 ?WHENFAIL(io:format("H: ~p~nS: ~p~n Res: ~p~n", [History, State, Res]), Res == ok)
             end),
-    run_prop(?FUNCTION_NAME, Prop, 1000, 2).
+    run_prop(?FUNCTION_NAME, Prop, 10000, 12).
 
 command(_State) ->
     oneof([
@@ -137,7 +140,7 @@ precondition(State, {call, ?MODULE, Wait, [Server, Key, _Tokens, Config]})
             true;
         false -> %% Track start for this key
             Shape = get_shape_from_config(Config),
-            Now = monotonic_time_from_shape_unit(Shape),
+            Now = erlang:monotonic_time(millisecond),
             ets:insert(?MODULE, {{Server, Key}, Shape, Now}),
             true
     end.
@@ -152,12 +155,13 @@ postcondition(State, {call, ?MODULE, request_wait, [Server, Key, Tokens, _Config
 
 do_postcondition(State, Server, Key, Tokens, Res) ->
     [{_, Shape, Start}] = ets:lookup(?MODULE, {Server, Key}),
-    Now = monotonic_time_from_shape_unit(Shape),
+    Now = erlang:monotonic_time(millisecond),
     TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
-    MinimumExpected = should_take_at_least(TokensNowConsumed, Shape, millisecond),
+    {MinimumExpectedMs, _} = should_take_in_range(Shape, TokensNowConsumed),
     Duration = Now - Start,
-    ct:pal("For shape ~p, requested ~p, expected ~p and duration ~p~n", [Shape, Tokens, MinimumExpected, Duration]),
-    continue =:= Res andalso MinimumExpected =< Duration.
+    ct:pal("For shape ~p, requested ~p, expected ~p and duration ~p~n",
+           [Shape, Tokens, MinimumExpectedMs, Duration]),
+    continue =:= Res andalso MinimumExpectedMs =< Duration.
 
 next_state(_State, _Result, {call, ?MODULE, reset_shapers, [_Server]}) ->
     #{};
@@ -165,11 +169,6 @@ next_state(State, _Result, {call, ?MODULE, Wait, [_Server, Key, Tokens, _Config]
   when Wait =:= wait; Wait =:= request_wait ->
     TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
     State#{Key => TokensNowConsumed}.
-
-monotonic_time_from_shape_unit({_, _, TimeUnit}) ->
-    erlang:monotonic_time(TimeUnit);
-monotonic_time_from_shape_unit(0) ->
-    erlang:monotonic_time(millisecond).
 
 tokens_now_consumed(State, Key, NewTokens) ->
     TokensConsumedSoFar = maps:get(Key, State, 0),
@@ -194,16 +193,29 @@ key() ->
     elements([ integer_to_binary(N) || N <- lists:seq(1, 100) ]).
 
 tokens() ->
-    integer(1, 9999).
+    integer(1, 99999).
 
 config() ->
-    union([shape(), function(0, shape())]).
+    union([shape_for_server(), function(0, shape_for_server())]).
+
+shape_for_server() ->
+    ShapeGen = {integer(1, 9999), integer(1, 9999)},
+    ?LET({M, N}, ShapeGen,
+         begin
+             #{bucket_size => max(M, N),
+               rate => min(M, N),
+               start_full => true}
+         end).
 
 shape() ->
-    Window = integer(1, 9999),
-    Rate = integer(1, 999),
-    Unit = oneof([millisecond, microsecond]),
-    {Window, Rate, Unit}.
+    ShapeGen = {integer(1, 99999), integer(1, 99999), boolean()},
+    ?LET(Shape, ShapeGen,
+         begin
+             {M, N, StartFull} = Shape,
+             #{bucket_size => max(M, N),
+               rate => min(M, N),
+               start_full => StartFull}
+         end).
 
 %%%===================================================================
 %% Helpers
@@ -215,34 +227,37 @@ success_or_log_and_return(false, S, P) ->
     ct:pal(S, P),
     false.
 
-%% Avoid rounding errors by using floats
-convert_time_unit(Time, SameUnit, SameUnit) -> Time;
-convert_time_unit(Time, microsecond, millisecond) -> Time / 1000;
-convert_time_unit(Time, microsecond, second) -> Time / (1000 * 1000);
-convert_time_unit(Time, millisecond, microsecond) -> Time * 1000;
-convert_time_unit(Time, millisecond, second) -> Time / 1000;
-convert_time_unit(Time, second, microsecond) -> Time * 1000 * 1000;
-convert_time_unit(Time, second, millisecond) -> Time * 1000.
-
-should_take_at_least(Consumed, {MaximumTokens, Rate, TimeUnit}, Unit) ->
-    case Consumed - MaximumTokens of
-        ToThrottle when ToThrottle =< 0 -> 0;
-        ToThrottle ->
-            Expected = ToThrottle / Rate,
-            floor(convert_time_unit(Expected, TimeUnit, Unit))
+should_take_in_range(#{rate := Rate, start_full := false}, ToConsume) ->
+    ExpectedMs = ToConsume / Rate,
+    {ExpectedMs, ExpectedMs + 1};
+should_take_in_range(#{bucket_size := MaximumTokens,
+                       rate := Rate,
+                       start_full := true},
+                     ToConsume) ->
+    case ToConsume < MaximumTokens of
+        true -> {0, 0};
+        false ->
+            ToThrottle = ToConsume - MaximumTokens,
+            ExpectedMs = ToThrottle / Rate,
+            {ExpectedMs, ExpectedMs + 1}
     end.
 
-run_shaper(Shaper, 0) ->
-    Shaper;
-run_shaper(Shaper, TokensLeft) ->
+run_shaper(Shape, ToConsume) ->
+    Now = erlang:monotonic_time(),
+    Shaper = opuntia:create(Shape, Now),
+    run_shaper(Shaper, Now, [], 0, ToConsume).
+
+run_shaper(Shaper, _, History, AccumulatedDelay, 0) ->
+    {Shaper, lists:reverse(History), AccumulatedDelay};
+run_shaper(Shaper, Now, History, AccumulatedDelay, TokensLeft) ->
     %% Uniform distributes in [1, N], and we want [0, N], so we generate [1, N+1] and subtract 1
     ConsumeNow = rand:uniform(TokensLeft + 1) - 1,
-    {NewShaper, DelayMs} = opuntia:update(Shaper, ConsumeNow),
-    timer:sleep(DelayMs),
-    run_shaper(NewShaper, TokensLeft - ConsumeNow).
+    {NewShaper, DelayMs} = opuntia:calculate(Shaper, ConsumeNow, Now),
+    true = DelayMs >= 0,
+    run_shaper(NewShaper, Now, [{ConsumeNow, DelayMs} | History], AccumulatedDelay + DelayMs, TokensLeft - ConsumeNow).
 
 run_prop(PropName, Property, NumTests, WorkersPerScheduler) ->
-    Opts = [quiet, long_result, {start_size, 2}, {numtests, NumTests},
+    Opts = [quiet, noshrink, {start_size, 1}, {numtests, NumTests},
             {numworkers, WorkersPerScheduler * erlang:system_info(schedulers_online)}],
     Res = proper:quickcheck(proper:conjunction([{PropName, Property}]), Opts),
     ?assertEqual(true, Res).

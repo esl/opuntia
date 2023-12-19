@@ -27,7 +27,12 @@
 -type args() :: #{max_delay => opuntia:delay(),
                   cleanup_interval => seconds(),
                   ttl => seconds()}.
--type rate() :: fun(() -> opuntia:shape()) | opuntia:shape().
+-type shape() :: 0 | #{bucket_size := opuntia:bucket_size(), rate := opuntia:rate(),
+                       time_unit := millisecond, start_full := true}.
+-type gen_shape() :: fun(() -> shape()) | shape().
+%% This accepts a function that generates the shape, if such shape was too expensive to calculate.
+%% Note that for this server, only full buckets and in milliseconds are valid, due to the nature of
+%% gen_server call timeouts.
 
 %% @doc Start-links a shaper server
 -spec start_link(name(), args()) -> ignore | {error, _} | {ok, pid()}.
@@ -37,15 +42,16 @@ start_link(Name, Args) ->
 %% @doc Shapes the caller from executing the action
 %%
 %% This will do an actual blocking `gen_server:call/3'.
--spec wait(gen_server:server_ref(), key(), opuntia:tokens(), rate()) ->
+-spec wait(gen_server:server_ref(), key(), opuntia:tokens(), gen_shape()) ->
     continue | {error, max_delay_reached}.
 wait(Shaper, Key, Tokens, Config) ->
     gen_server:call(Shaper, {wait, Key, Tokens, Config}, infinity).
 
 %% @doc Shapes the caller from executing the action, asynchronously
 %%
-%% This will do a `gen_server:send_request/2'. Usual pattern applies to receive the matching continue.
--spec request_wait(gen_server:server_ref(), key(), opuntia:tokens(), rate()) ->
+%% This will do a `gen_server:send_request/2'.
+%% Usual pattern applies to receive the matching continue.
+-spec request_wait(gen_server:server_ref(), key(), opuntia:tokens(), gen_shape()) ->
     gen_server:request_id().
 request_wait(Shaper, Key, Tokens, Config) ->
     gen_server:send_request(Shaper, {wait, Key, Tokens, Config}).
