@@ -15,9 +15,9 @@
 -record(opuntia_state, {
           name :: name(),
           max_delay :: opuntia:delay(), %% Maximum amount of time units to wait
-          gc_ttl :: non_neg_integer(), %% How many seconds to store each shaper
-          gc_time :: non_neg_integer(), %% How often to run the gc
-          gc_ref :: undefined | reference(),
+          cleanup_ttl :: non_neg_integer(), %% How many seconds to store each shaper
+          cleanup_time :: non_neg_integer(), %% How often to run the gc
+          cleanup_ref :: undefined | reference(),
           shapers = #{} :: #{key() := opuntia:shaper()}
          }).
 -type opuntia_state() :: #opuntia_state{}. %% @private
@@ -25,27 +25,33 @@
 -type key() :: term().
 -type seconds() :: non_neg_integer().
 -type args() :: #{max_delay => opuntia:delay(),
-                  gc_interval => seconds(),
+                  cleanup_interval => seconds(),
                   ttl => seconds()}.
--type maybe_rate() :: fun(() -> opuntia:rate()) | opuntia:rate().
+-type shape() :: 0 | #{bucket_size := opuntia:bucket_size(), rate := opuntia:rate(),
+                       time_unit := millisecond, start_full := true}.
+-type gen_shape() :: fun(() -> shape()) | shape().
+%% This accepts a function that generates the shape, if such shape was too expensive to calculate.
+%% Note that for this server, only full buckets and in milliseconds are valid, due to the nature of
+%% gen_server call timeouts.
 
-%% @doc starts a shaper server
+%% @doc Start-links a shaper server
 -spec start_link(name(), args()) -> ignore | {error, _} | {ok, pid()}.
 start_link(Name, Args) ->
     gen_server:start_link(?MODULE, {Name, Args}, []).
 
 %% @doc Shapes the caller from executing the action
 %%
-%% This will do an actual blocking `gen_server:call/3'
--spec wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
+%% This will do an actual blocking `gen_server:call/3'.
+-spec wait(gen_server:server_ref(), key(), opuntia:tokens(), gen_shape()) ->
     continue | {error, max_delay_reached}.
 wait(Shaper, Key, Tokens, Config) ->
     gen_server:call(Shaper, {wait, Key, Tokens, Config}, infinity).
 
 %% @doc Shapes the caller from executing the action, asynchronously
 %%
-%% This will do a `gen_server:send_request/2'. Usual pattern applies to receive the matching continue.
--spec request_wait(gen_server:server_ref(), key(), opuntia:tokens(), maybe_rate()) ->
+%% This will do a `gen_server:send_request/2'.
+%% Usual pattern applies to receive the matching continue.
+-spec request_wait(gen_server:server_ref(), key(), opuntia:tokens(), gen_shape()) ->
     gen_server:request_id().
 request_wait(Shaper, Key, Tokens, Config) ->
     gen_server:send_request(Shaper, {wait, Key, Tokens, Config}).
@@ -59,9 +65,10 @@ reset_shapers(ProcName) ->
 -spec init({name(), args()}) -> {ok, opuntia_state()}.
 init({Name, Args}) ->
     MaxDelay = maps:get(max_delay, Args, 3000),
-    GCInt = timer:seconds(maps:get(gc_interval, Args, 30)),
+    GCInt = timer:seconds(maps:get(cleanup_interval, Args, 30)),
     GCTTL = maps:get(ttl, Args, 120),
-    State = #opuntia_state{name = Name, max_delay = MaxDelay, gc_ttl = GCTTL, gc_time = GCInt},
+    State = #opuntia_state{name = Name, max_delay = MaxDelay,
+                           cleanup_ttl = GCTTL, cleanup_time = GCInt},
     {ok, schedule_cleanup(State)}.
 
 %% @private
@@ -101,7 +108,7 @@ handle_cast(Msg, #opuntia_state{name = Name} = State) ->
     {noreply, State}.
 
 %% @private
-handle_info({timeout, TRef, cleanup}, #opuntia_state{gc_ref = TRef} = State) ->
+handle_info({timeout, TRef, cleanup}, #opuntia_state{cleanup_ref = TRef} = State) ->
     {noreply, schedule_cleanup(cleanup(State))};
 handle_info(Info, #opuntia_state{name = Name} = State) ->
     telemetry:execute([opuntia, unknown_request, Name], #{value => 1}, #{msg => Info, type => info}),
@@ -117,32 +124,32 @@ find_or_create_shaper(#opuntia_state{shapers = Shapers}, Key, Config) ->
         _ -> create_new_from_config(Config)
     end.
 
-create_new_from_config(N) when is_number(N), N >= 0 ->
-    opuntia:new(N);
 create_new_from_config(Config) when is_function(Config, 0) ->
-    create_new_from_config(Config()).
+    create_new_from_config(Config());
+create_new_from_config(N) ->
+    opuntia:new(N).
 
 save_shaper(#opuntia_state{shapers = Shapers} = State, Key, Shaper) ->
     State#opuntia_state{shapers = maps:put(Key, Shaper, Shapers)}.
 
-cleanup(State = #opuntia_state{name = Name, shapers = Shapers, gc_ttl = TTL}) ->
+cleanup(State = #opuntia_state{name = Name, shapers = Shapers, cleanup_ttl = TTL}) ->
     telemetry:execute([opuntia, cleanup, Name], #{}, #{}),
     TimestampThreshold = erlang:system_time(second) - TTL,
     Min = erlang:convert_time_unit(TimestampThreshold, second, millisecond),
-    F = fun(_, #token_bucket{last_update = ATime}) -> ATime > Min;
+    F = fun(_, #token_bucket_shaper{last_update = ATime}) -> ATime > Min;
            (_, none) -> false end,
     RemainingShapers = maps:filter(F, Shapers),
     State#opuntia_state{shapers = RemainingShapers}.
 
-schedule_cleanup(#opuntia_state{gc_time = 0} = State) ->
+schedule_cleanup(#opuntia_state{cleanup_time = 0} = State) ->
     State;
-schedule_cleanup(#opuntia_state{gc_time = GCInt} = State) ->
+schedule_cleanup(#opuntia_state{cleanup_time = GCInt} = State) ->
     TRef = erlang:start_timer(GCInt, self(), cleanup),
-    State#opuntia_state{gc_ref = TRef}.
+    State#opuntia_state{cleanup_ref = TRef}.
 
 %% @doc It is a small hack
-%% This function calls this in more efficient way:
+%% This function calls this in a more efficient way:
 %% timer:apply_after(DelayMs, gen_server, reply, [From, Reply]).
--spec reply_after(opuntia:rate(), {atom() | pid(), _}, continue) -> reference().
+-spec reply_after(opuntia:delay(), {atom() | pid(), _}, continue) -> reference().
 reply_after(DelayMs, {Pid, Tag}, Reply) ->
     erlang:send_after(DelayMs, Pid, {Tag, Reply}).
