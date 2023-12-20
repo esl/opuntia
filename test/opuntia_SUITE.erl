@@ -240,7 +240,7 @@ success_or_log_and_return(false, S, P) ->
 should_take_in_range(#{rate := Rate, time_unit := TimeUnit, start_full := false}, ToConsume) ->
     Expected = ToConsume / Rate,
     ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
-    {ExpectedMs, ExpectedMs + 1};
+    {ExpectedMs, ceil(ExpectedMs + 1)};
 should_take_in_range(#{bucket_size := MaximumTokens,
                        rate := Rate,
                        time_unit := TimeUnit,
@@ -252,7 +252,7 @@ should_take_in_range(#{bucket_size := MaximumTokens,
             ToThrottle = ToConsume - MaximumTokens,
             Expected = ToThrottle / Rate,
             ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
-            {ExpectedMs, ExpectedMs + 1}
+            {ExpectedMs, ceil(ExpectedMs + 1)}
     end.
 
 run_shaper(Shape, ToConsume) ->
