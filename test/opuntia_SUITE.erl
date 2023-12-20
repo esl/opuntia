@@ -72,7 +72,8 @@ keep_table() ->
 
 simple_test_no_delay_is_needed(_) ->
     FoldFun = fun(N, ShIn) -> {ShOut, 0} = opuntia:update(ShIn, N), ShOut end,
-    Shaper = opuntia:new(#{bucket_size => 100000, rate => 10000, start_full => true}),
+    Config = #{bucket_size => 100000, rate => 10000, time_unit => millisecond, start_full => true},
+    Shaper = opuntia:new(Config),
     lists:foldl(FoldFun, Shaper, lists:duplicate(10000, 1)).
 
 run_shaper_with_zero_does_not_shape(_) ->
@@ -205,21 +206,24 @@ config() ->
     union([shape_for_server(), function(0, shape_for_server())]).
 
 shape_for_server() ->
-    ShapeGen = {integer(1, 9999), integer(1, 9999)},
-    ?LET({M, N}, ShapeGen,
-         begin
-             #{bucket_size => max(M, N),
-               rate => min(M, N),
-               start_full => true}
-         end).
+    Unit = oneof([second, millisecond, microsecond, nanosecond, native]),
+    %% server is slower and proper struggles with bigger numbers, not critical
+    ShapeGen = {integer(1, 999), integer(1, 999), Unit, boolean()},
+    let_shape(ShapeGen).
 
 shape() ->
-    ShapeGen = {integer(1, 99999), integer(1, 99999), boolean()},
+    Unit = oneof([second, millisecond, microsecond, nanosecond, native]),
+    Int = integer(1, 99999),
+    ShapeGen = {Int, Int, Unit, boolean()},
+    let_shape(ShapeGen).
+
+let_shape(ShapeGen) ->
     ?LET(Shape, ShapeGen,
          begin
-             {M, N, StartFull} = Shape,
+             {M, N, TimeUnit, StartFull} = Shape,
              #{bucket_size => max(M, N),
                rate => min(M, N),
+               time_unit => TimeUnit,
                start_full => StartFull}
          end).
 
@@ -233,18 +237,21 @@ success_or_log_and_return(false, S, P) ->
     ct:pal(S, P),
     false.
 
-should_take_in_range(#{rate := Rate, start_full := false}, ToConsume) ->
-    ExpectedMs = ToConsume / Rate,
+should_take_in_range(#{rate := Rate, time_unit := TimeUnit, start_full := false}, ToConsume) ->
+    Expected = ToConsume / Rate,
+    ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
     {ExpectedMs, ExpectedMs + 1};
 should_take_in_range(#{bucket_size := MaximumTokens,
                        rate := Rate,
+                       time_unit := TimeUnit,
                        start_full := true},
                      ToConsume) ->
     case ToConsume < MaximumTokens of
         true -> {0, 0};
         false ->
             ToThrottle = ToConsume - MaximumTokens,
-            ExpectedMs = ToThrottle / Rate,
+            Expected = ToThrottle / Rate,
+            ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
             {ExpectedMs, ExpectedMs + 1}
     end.
 
