@@ -166,9 +166,10 @@ do_postcondition(State, Server, Key, Tokens, Res) ->
     TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
     {MinimumExpectedMs, _} = should_take_in_range(Shape, TokensNowConsumed),
     Duration = Now - Start,
-    ct:pal("For shape ~p, requested ~p, expected ~p and duration ~p~n",
-           [Shape, Tokens, MinimumExpectedMs, Duration]),
-    continue =:= Res andalso MinimumExpectedMs =< Duration.
+    S = "For shape ~p, consumed ~p, expected-min-time ~f and it took duration ~B~n",
+    P = [{maps:get(rate, Shape), maps:get(time_unit, Shape)}, Tokens, floor(MinimumExpectedMs), Duration],
+    Val = continue =:= Res andalso floor(MinimumExpectedMs) =< Duration,
+    success_or_log_and_return(Val, S, P).
 
 next_state(_State, _Result, {call, ?MODULE, reset_shapers, [_Server]}) ->
     #{};
@@ -256,18 +257,24 @@ should_take_in_range(#{bucket_size := MaximumTokens,
     end.
 
 run_shaper(Shape, ToConsume) ->
-    Now = erlang:monotonic_time(),
-    Shaper = opuntia:create(Shape, Now),
-    run_shaper(Shaper, Now, [], 0, ToConsume).
+    Shaper = opuntia:create(Shape, 0),
+    run_shaper(Shaper, [], 0, ToConsume).
 
-run_shaper(Shaper, _, History, AccumulatedDelay, 0) ->
+run_shaper(Shaper, History, AccumulatedDelay, 0) ->
     {Shaper, lists:reverse(History), AccumulatedDelay};
-run_shaper(Shaper, Now, History, AccumulatedDelay, TokensLeft) ->
+run_shaper(Shaper, History, AccumulatedDelay, TokensLeft) ->
     %% Uniform distributes in [1, N], and we want [0, N], so we generate [1, N+1] and subtract 1
     ConsumeNow = rand:uniform(TokensLeft + 1) - 1,
-    {NewShaper, DelayMs} = opuntia:calculate(Shaper, ConsumeNow, Now),
-    true = DelayMs >= 0,
-    run_shaper(NewShaper, Now, [{ConsumeNow, DelayMs} | History], AccumulatedDelay + DelayMs, TokensLeft - ConsumeNow).
+    {NewShaper, DelayMs} = opuntia:calculate(Shaper, ConsumeNow, 0),
+    NewHistory = [{ConsumeNow, DelayMs, NewShaper} | History],
+    NewDelay = AccumulatedDelay + DelayMs,
+    NewToConsume = TokensLeft - ConsumeNow,
+    case is_integer(DelayMs) andalso DelayMs >= 0 of
+        true ->
+            run_shaper(NewShaper, NewHistory, NewDelay, NewToConsume);
+        false ->
+            {NewShaper, NewHistory, NewDelay, NewToConsume}
+    end.
 
 run_prop(PropName, Property, NumTests, WorkersPerScheduler) ->
     Opts = [quiet, noshrink, {start_size, 1}, {numtests, NumTests},
