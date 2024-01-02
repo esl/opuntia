@@ -71,8 +71,12 @@ keep_table() ->
 %%%===================================================================
 
 simple_test_no_delay_is_needed(_) ->
+    Units = [second, millisecond, microsecond, nanosecond, native],
+    [ simple_test_no_delay_is_needed_for_unit(Unit) || Unit <- Units ].
+
+simple_test_no_delay_is_needed_for_unit(Unit) ->
     FoldFun = fun(N, ShIn) -> {ShOut, 0} = opuntia:update(ShIn, N), ShOut end,
-    Config = #{bucket_size => 100000, rate => 10000, time_unit => millisecond, start_full => true},
+    Config = #{bucket_size => 100000, rate => 10000, time_unit => Unit, start_full => true},
     Shaper = opuntia:new(Config),
     lists:foldl(FoldFun, Shaper, lists:duplicate(10000, 1)).
 
