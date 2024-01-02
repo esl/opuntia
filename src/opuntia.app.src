@@ -11,5 +11,5 @@
   {doc, "doc"},
   {modules, []},
   {licenses, ["Apache 2.0"]},
-  {links, [{"GitHub", "https://github.com/NelsonVides/opuntia/"}]}
+  {links, [{"GitHub", "https://github.com/esl/opuntia/"}]}
  ]}.
