@@ -166,10 +166,11 @@ calculate(#token_bucket_shaper{shape = {MaximumTokens, Rate, TimeUnit},
                                                    debt = OverUsedRateNowInUnits},
             {NewShaper, RoundedDelayMs};
         %% I penalised you too much last time, you get off now but with a future bill
-        Punish when Punish =< +0.0 ->
+        Punish when Punish < +0.0 ->
+            DebtInUnits = convert_time_unit(-Punish, millisecond, TimeUnit),
             NewShaper = Shaper#token_bucket_shaper{available_tokens = TokensAvailable,
                                                    last_update = NativeNow,
-                                                   debt = -Punish},
+                                                   debt = DebtInUnits},
             {NewShaper, 0}
     end.
 
