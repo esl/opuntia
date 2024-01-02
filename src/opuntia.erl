@@ -15,7 +15,8 @@
 -ifdef(TEST).
 -export([create/2, calculate/3, convert_time_unit/3]).
 -else.
--compile({inline, [create/2, calculate/3, convert_time_unit/3]}).
+-compile({inline, [create/2, calculate/3, convert_time_unit/3, timediff_in_units/3,
+                   unbounded_bucket_diff/3, exactly_available_now/2, final_state/4]}).
 -endif.
 
 -include("opuntia.hrl").
@@ -125,19 +126,12 @@ calculate(#token_bucket_shaper{shape = {MaximumTokens, Rate, TimeUnit},
                                available_tokens = LastAvailableTokens,
                                last_update = NativeLastUpdate,
                                debt = OverPenalisedInUnitsLastTime} = Shaper, TokensNowUsed, NativeNow) ->
-    NativeTimeSinceLastUpdate = NativeNow - NativeLastUpdate,
 
-    %% This is now a float and so will all below be, to preserve best rounding errors possible
-    TimeSinceLastUpdate = convert_time_unit(NativeTimeSinceLastUpdate, native, TimeUnit),
+    TimeDiffInUnits = timediff_in_units(TimeUnit, NativeLastUpdate, NativeNow),
 
-    %% How much we might have recovered since last time
-    AvailableAtGrowthRate = Rate * TimeSinceLastUpdate,
-    UnboundedTokenGrowth = LastAvailableTokens + AvailableAtGrowthRate,
+    UnboundedTokenGrowth = unbounded_bucket_diff(Rate, LastAvailableTokens, TimeDiffInUnits),
 
-    %% Real recovery cannot grow higher than the actual rate in the window frame
-    ExactlyAvailableNow0 = min(MaximumTokens, UnboundedTokenGrowth),
-    %% But it can't be negative either (which can happen if we were already in debt)
-    ExactlyAvailableNow = max(0, ExactlyAvailableNow0),
+    ExactlyAvailableNow = exactly_available_now(MaximumTokens, UnboundedTokenGrowth),
 
     %% How many are available after using TokensNowUsed can't be smaller than zero
     TokensAvailable = max(0, ExactlyAvailableNow - TokensNowUsed),
@@ -148,31 +142,62 @@ calculate(#token_bucket_shaper{shape = {MaximumTokens, Rate, TimeUnit},
     %% And then MaybeDelay will be zero if TokensOverused was zero
     OverUsedRateNow = TokensOverused / Rate,
 
-    %% We penalise rounding up, the most important contract is that rate will never exceed that
-    %% requested, but the same way timeouts in Erlang promise not to arrive any time earlier but
-    %% don't promise at what time in the future they would arrive, nor we promise any upper bound
-    %% to the limits of the shaper delay.
-    case OverUsedRateNow - OverPenalisedInUnitsLastTime of
-        %% Even after paying the old debt you incurr a new debt again
-        Punish when Punish >= +0.0 ->
-            DelayMs = convert_time_unit(Punish, TimeUnit, millisecond),
-            RoundedDelayMs = ceil(DelayMs),
-            OverPenalisedNow = RoundedDelayMs - DelayMs,
-            OverUsedRateNowInUnits = convert_time_unit(OverPenalisedNow, millisecond, TimeUnit),
-            DelayNative = convert_time_unit(RoundedDelayMs, TimeUnit, native),
-            RoundedDelayNative = ceil(DelayNative),
-            NewShaper = Shaper#token_bucket_shaper{available_tokens = TokensAvailable,
-                                                   last_update = NativeNow + RoundedDelayNative,
-                                                   debt = OverUsedRateNowInUnits},
-            {NewShaper, RoundedDelayMs};
-        %% I penalised you too much last time, you get off now but with a future bill
-        Punish when Punish < +0.0 ->
-            DebtInUnits = convert_time_unit(-Punish, millisecond, TimeUnit),
-            NewShaper = Shaper#token_bucket_shaper{available_tokens = TokensAvailable,
-                                                   last_update = NativeNow,
-                                                   debt = DebtInUnits},
-            {NewShaper, 0}
-    end.
+    NewShaper = Shaper#token_bucket_shaper{available_tokens = TokensAvailable},
+    Punish = OverUsedRateNow - OverPenalisedInUnitsLastTime,
+    final_state(NewShaper, TimeUnit, Punish, NativeNow).
+
+-spec timediff_in_units(time_unit(), integer(), integer()) -> float().
+timediff_in_units(TimeUnit, NativeLastUpdate, NativeNow) ->
+    %% Time difference between now and the last update, in native
+    NativeTimeSinceLastUpdate = NativeNow - NativeLastUpdate,
+    %% This is now a float and so will all below be, to preserve best rounding errors possible
+    convert_time_unit(NativeTimeSinceLastUpdate, native, TimeUnit).
+
+%% Unbounded growth is calculated, with float precision, in the configured time units
+%%
+%% Note that it can be negative, if earlier we have penalised giving a larger `last_update' and now we
+%% update even before we have reach the point in time where the previous `last_update' was set
+%%
+%% If the growth was negative, that means that it has grown the debt instead
+-spec unbounded_bucket_diff(rate(), tokens(), float()) -> float().
+unbounded_bucket_diff(Rate, LastAvailableTokens, TimeDiffInUnits) ->
+    %% How much we might have recovered since last time
+    AvailableAtGrowthRate = Rate * TimeDiffInUnits,
+    %% Unbounded growth at rate since the last update
+    LastAvailableTokens + AvailableAtGrowthRate.
+
+%% This is the real growth considering the maximum bucket size.
+-spec exactly_available_now(bucket_size(), float()) -> float().
+exactly_available_now(MaximumTokens, UnboundedTokenGrowth) ->
+    %% Real recovery cannot grow higher than the actual rate in the window frame
+    ExactlyAvailableNow0 = min(MaximumTokens, UnboundedTokenGrowth),
+    %% But it can't be negative either which can happen if we were already in debt,
+    %% but this is a debt we will pay when we calculate the final punishment in final_state
+    max(+0.0, ExactlyAvailableNow0).
+
+%% We penalise rounding up, the most important contract is that rate will never exceed that
+%% requested, but the same way timeouts in Erlang promise not to arrive any time earlier but
+%% don't promise at what time in the future they would arrive, nor we promise any upper bound
+%% to the limits of the shaper delay.
+%%
+%% Two cases, either:
+%%   Punish is positive: even after paying the old debt you incurr a new debt again
+%%   Punish is negative: I overpenalised you last time, you get off now but with a future bill
+final_state(Shaper, TimeUnit, Punish, NativeNow) when Punish >= +0.0 ->
+    DelayMs = convert_time_unit(Punish, TimeUnit, millisecond),
+    RoundedDelayMs = ceil(DelayMs),
+    OverPenalisedNow = RoundedDelayMs - DelayMs,
+    OverUsedRateNowInUnits = convert_time_unit(OverPenalisedNow, millisecond, TimeUnit),
+    DelayNative = convert_time_unit(RoundedDelayMs, TimeUnit, native),
+    RoundedDelayNative = ceil(DelayNative),
+    NewShaper = Shaper#token_bucket_shaper{last_update = NativeNow + RoundedDelayNative,
+                                           debt = OverUsedRateNowInUnits},
+    {NewShaper, RoundedDelayMs};
+final_state(Shaper, TimeUnit, Punish, NativeNow) when Punish < +0.0 ->
+    DebtInUnits = convert_time_unit(-Punish, millisecond, TimeUnit),
+    NewShaper = Shaper#token_bucket_shaper{last_update = NativeNow,
+                                           debt = DebtInUnits},
+    {NewShaper, 0}.
 
 %% Avoid rounding errors by using floats and float division,
 %% erlang:convert_time_unit works only with integers

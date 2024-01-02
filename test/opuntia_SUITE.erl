@@ -30,7 +30,14 @@ groups() ->
        run_shaper_without_consuming_does_not_delay,
        run_basic_shaper_property,
        run_stateful_server
-      ]}
+      ]},
+     %% This group is purposefully left out because it is too slow to run on CI,
+     %% and uses a `timer:tc/4` only available since OTP26
+     %% Here for the record, can be enabled locally and checked
+     {delays, [sequence],
+     [
+       run_with_delays
+     ]}
     ].
 
 %%%===================================================================
@@ -97,6 +104,25 @@ run_shaper_without_consuming_does_not_delay(_) ->
                   success_or_log_and_return(Val, "shape of ~p was actually requested", [Delay])
               end),
     run_prop(?FUNCTION_NAME, Prop, 1000, 2).
+
+run_with_delays(_) ->
+    S = "ToConsume ~p, Shape ~p, TimeItTook ~p, CalculatedDelay ~p ms, in range [~p, ~p]ms, ~nLastShaper ~p,~nHistory ~p",
+    Prop = ?FORALL(
+              {TokensToSpend, Shape},
+              {tokens(), shape()},
+              begin
+                  Shaper = opuntia:new(Shape),
+                  {TimeItTookUs, {LastShaper, History, CalculatedDelay}} =
+                    timer:tc(fun run_with_sleeps/2, [Shaper, TokensToSpend], native),
+                  TimeItTookMs = opuntia:convert_time_unit(TimeItTookUs, native, millisecond),
+                  {CannotBeFasterThan, CannotBeSlowerThan} = should_take_in_range(Shape, TokensToSpend),
+                  AdjustCannotBeSlowerThan = CannotBeSlowerThan + 10,
+                  Val = value_in_range(TimeItTookMs, CannotBeFasterThan, AdjustCannotBeSlowerThan),
+                  P = [TokensToSpend, Shape, TimeItTookMs, CalculatedDelay, CannotBeFasterThan,
+                       AdjustCannotBeSlowerThan, LastShaper, History],
+                  success_or_log_and_return(Val andalso is_integer(CalculatedDelay), S, P)
+              end),
+    run_prop(?FUNCTION_NAME, Prop, 100, 1).
 
 run_basic_shaper_property(_) ->
     S = "ToConsume ~p, Shape ~p, CalculatedDelay ~p ms, in range [~p, ~p]ms, ~nLastShaper ~p,~nHistory ~p",
@@ -207,19 +233,20 @@ key() ->
 tokens() ->
     integer(1, 99999).
 
+time_unit() ->
+    oneof([second, millisecond, microsecond, nanosecond, native]).
+
 config() ->
     union([shape_for_server(), function(0, shape_for_server())]).
 
 shape_for_server() ->
-    Unit = oneof([second, millisecond, microsecond, nanosecond, native]),
     %% server is slower and proper struggles with bigger numbers, not critical
-    ShapeGen = {integer(1, 999), integer(1, 999), Unit, boolean()},
+    ShapeGen = {integer(1, 999), integer(1, 999), time_unit(), boolean()},
     let_shape(ShapeGen).
 
 shape() ->
-    Unit = oneof([second, millisecond, microsecond, nanosecond, native]),
     Int = integer(1, 99999),
-    ShapeGen = {Int, Int, Unit, boolean()},
+    ShapeGen = {Int, Int, time_unit(), boolean()},
     let_shape(ShapeGen).
 
 let_shape(ShapeGen) ->
@@ -252,13 +279,27 @@ should_take_in_range(#{bucket_size := MaximumTokens,
                        start_full := true},
                      ToConsume) ->
     case ToConsume < MaximumTokens of
-        true -> {0, 0};
+        true -> {0, 1};
         false ->
             ToThrottle = ToConsume - MaximumTokens,
             Expected = ToThrottle / Rate,
             ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
             {ExpectedMs, ceil(ExpectedMs + 1)}
     end.
+
+run_with_sleeps(Shaper, ToConsume) ->
+    run_with_sleeps(Shaper, [], 0, ToConsume).
+
+run_with_sleeps(Shaper, History, AccumulatedDelay, TokensLeft) when TokensLeft =< 0 ->
+    {Shaper, lists:reverse(History), AccumulatedDelay};
+run_with_sleeps(Shaper, History, AccumulatedDelay, TokensLeft) ->
+    ConsumeNow = rand:uniform(TokensLeft),
+    {NewShaper, DelayMs} = opuntia:update(Shaper, ConsumeNow),
+    timer:sleep(DelayMs),
+    NewEvent = #{consumed => ConsumeNow, proposed_delay => DelayMs, shaper => Shaper},
+    NewHistory = [NewEvent | History],
+    NewDelay = AccumulatedDelay + DelayMs,
+    run_with_sleeps(NewShaper, NewHistory, NewDelay, TokensLeft - ConsumeNow).
 
 run_shaper(Shape, ToConsume) ->
     Shaper = opuntia:create(Shape, 0),
@@ -270,7 +311,8 @@ run_shaper(Shaper, History, AccumulatedDelay, TokensLeft) ->
     %% Uniform distributes in [1, N], and we want [0, N], so we generate [1, N+1] and subtract 1
     ConsumeNow = rand:uniform(TokensLeft + 1) - 1,
     {NewShaper, DelayMs} = opuntia:calculate(Shaper, ConsumeNow, 0),
-    NewHistory = [{ConsumeNow, DelayMs, NewShaper} | History],
+    NewEvent = #{consumed => ConsumeNow, proposed_delay => DelayMs, final_shaper => NewShaper},
+    NewHistory = [NewEvent | History],
     NewDelay = AccumulatedDelay + DelayMs,
     NewToConsume = TokensLeft - ConsumeNow,
     case is_integer(DelayMs) andalso DelayMs >= 0 of
