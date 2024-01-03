@@ -30,7 +30,14 @@ groups() ->
        run_shaper_without_consuming_does_not_delay,
        run_basic_shaper_property,
        run_stateful_server
-      ]}
+      ]},
+     %% This group is purposefully left out because it is too slow to run on CI,
+     %% and uses a `timer:tc/4` only available since OTP26
+     %% Here for the record, can be enabled locally and checked
+     {delays, [sequence],
+     [
+       run_with_delays
+     ]}
     ].
 
 %%%===================================================================
@@ -71,8 +78,13 @@ keep_table() ->
 %%%===================================================================
 
 simple_test_no_delay_is_needed(_) ->
+    Units = [second, millisecond, microsecond, nanosecond, native],
+    [ simple_test_no_delay_is_needed_for_unit(Unit) || Unit <- Units ].
+
+simple_test_no_delay_is_needed_for_unit(Unit) ->
     FoldFun = fun(N, ShIn) -> {ShOut, 0} = opuntia:update(ShIn, N), ShOut end,
-    Shaper = opuntia:new(#{bucket_size => 100000, rate => 10000, start_full => true}),
+    Config = #{bucket_size => 100000, rate => 10000, time_unit => Unit, start_full => true},
+    Shaper = opuntia:new(Config),
     lists:foldl(FoldFun, Shaper, lists:duplicate(10000, 1)).
 
 run_shaper_with_zero_does_not_shape(_) ->
@@ -92,6 +104,25 @@ run_shaper_without_consuming_does_not_delay(_) ->
                   success_or_log_and_return(Val, "shape of ~p was actually requested", [Delay])
               end),
     run_prop(?FUNCTION_NAME, Prop, 1000, 2).
+
+run_with_delays(_) ->
+    S = "ToConsume ~p, Shape ~p, TimeItTook ~p, CalculatedDelay ~p ms, in range [~p, ~p]ms, ~nLastShaper ~p,~nHistory ~p",
+    Prop = ?FORALL(
+              {TokensToSpend, Shape},
+              {tokens(), shape()},
+              begin
+                  Shaper = opuntia:new(Shape),
+                  {TimeItTookUs, {LastShaper, History, CalculatedDelay}} =
+                    timer:tc(fun run_with_sleeps/2, [Shaper, TokensToSpend], native),
+                  TimeItTookMs = opuntia:convert_time_unit(TimeItTookUs, native, millisecond),
+                  {CannotBeFasterThan, CannotBeSlowerThan} = should_take_in_range(Shape, TokensToSpend),
+                  AdjustCannotBeSlowerThan = CannotBeSlowerThan + 10,
+                  Val = value_in_range(TimeItTookMs, CannotBeFasterThan, AdjustCannotBeSlowerThan),
+                  P = [TokensToSpend, Shape, TimeItTookMs, CalculatedDelay, CannotBeFasterThan,
+                       AdjustCannotBeSlowerThan, LastShaper, History],
+                  success_or_log_and_return(Val andalso is_integer(CalculatedDelay), S, P)
+              end),
+    run_prop(?FUNCTION_NAME, Prop, 100, 1).
 
 run_basic_shaper_property(_) ->
     S = "ToConsume ~p, Shape ~p, CalculatedDelay ~p ms, in range [~p, ~p]ms, ~nLastShaper ~p,~nHistory ~p",
@@ -165,9 +196,10 @@ do_postcondition(State, Server, Key, Tokens, Res) ->
     TokensNowConsumed = tokens_now_consumed(State, Key, Tokens),
     {MinimumExpectedMs, _} = should_take_in_range(Shape, TokensNowConsumed),
     Duration = Now - Start,
-    ct:pal("For shape ~p, requested ~p, expected ~p and duration ~p~n",
-           [Shape, Tokens, MinimumExpectedMs, Duration]),
-    continue =:= Res andalso MinimumExpectedMs =< Duration.
+    S = "For shape ~p, consumed ~p, expected-min-time ~f and it took duration ~B~n",
+    P = [{maps:get(rate, Shape), maps:get(time_unit, Shape)}, Tokens, floor(MinimumExpectedMs), Duration],
+    Val = continue =:= Res andalso floor(MinimumExpectedMs) =< Duration,
+    success_or_log_and_return(Val, S, P).
 
 next_state(_State, _Result, {call, ?MODULE, reset_shapers, [_Server]}) ->
     #{};
@@ -201,25 +233,29 @@ key() ->
 tokens() ->
     integer(1, 99999).
 
+time_unit() ->
+    oneof([second, millisecond, microsecond, nanosecond, native]).
+
 config() ->
     union([shape_for_server(), function(0, shape_for_server())]).
 
 shape_for_server() ->
-    ShapeGen = {integer(1, 9999), integer(1, 9999)},
-    ?LET({M, N}, ShapeGen,
-         begin
-             #{bucket_size => max(M, N),
-               rate => min(M, N),
-               start_full => true}
-         end).
+    %% server is slower and proper struggles with bigger numbers, not critical
+    ShapeGen = {integer(1, 999), integer(1, 999), time_unit(), boolean()},
+    let_shape(ShapeGen).
 
 shape() ->
-    ShapeGen = {integer(1, 99999), integer(1, 99999), boolean()},
+    Int = integer(1, 99999),
+    ShapeGen = {Int, Int, time_unit(), boolean()},
+    let_shape(ShapeGen).
+
+let_shape(ShapeGen) ->
     ?LET(Shape, ShapeGen,
          begin
-             {M, N, StartFull} = Shape,
+             {M, N, TimeUnit, StartFull} = Shape,
              #{bucket_size => max(M, N),
                rate => min(M, N),
+               time_unit => TimeUnit,
                start_full => StartFull}
          end).
 
@@ -233,34 +269,58 @@ success_or_log_and_return(false, S, P) ->
     ct:pal(S, P),
     false.
 
-should_take_in_range(#{rate := Rate, start_full := false}, ToConsume) ->
-    ExpectedMs = ToConsume / Rate,
-    {ExpectedMs, ExpectedMs + 1};
+should_take_in_range(#{rate := Rate, time_unit := TimeUnit, start_full := false}, ToConsume) ->
+    Expected = ToConsume / Rate,
+    ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
+    {ExpectedMs, ceil(ExpectedMs + 1)};
 should_take_in_range(#{bucket_size := MaximumTokens,
                        rate := Rate,
+                       time_unit := TimeUnit,
                        start_full := true},
                      ToConsume) ->
     case ToConsume < MaximumTokens of
-        true -> {0, 0};
+        true -> {0, 1};
         false ->
             ToThrottle = ToConsume - MaximumTokens,
-            ExpectedMs = ToThrottle / Rate,
-            {ExpectedMs, ExpectedMs + 1}
+            Expected = ToThrottle / Rate,
+            ExpectedMs = opuntia:convert_time_unit(Expected, TimeUnit, millisecond),
+            {ExpectedMs, ceil(ExpectedMs + 1)}
     end.
 
-run_shaper(Shape, ToConsume) ->
-    Now = erlang:monotonic_time(),
-    Shaper = opuntia:create(Shape, Now),
-    run_shaper(Shaper, Now, [], 0, ToConsume).
+run_with_sleeps(Shaper, ToConsume) ->
+    run_with_sleeps(Shaper, [], 0, ToConsume).
 
-run_shaper(Shaper, _, History, AccumulatedDelay, 0) ->
+run_with_sleeps(Shaper, History, AccumulatedDelay, TokensLeft) when TokensLeft =< 0 ->
     {Shaper, lists:reverse(History), AccumulatedDelay};
-run_shaper(Shaper, Now, History, AccumulatedDelay, TokensLeft) ->
+run_with_sleeps(Shaper, History, AccumulatedDelay, TokensLeft) ->
+    ConsumeNow = rand:uniform(TokensLeft),
+    {NewShaper, DelayMs} = opuntia:update(Shaper, ConsumeNow),
+    timer:sleep(DelayMs),
+    NewEvent = #{consumed => ConsumeNow, proposed_delay => DelayMs, shaper => Shaper},
+    NewHistory = [NewEvent | History],
+    NewDelay = AccumulatedDelay + DelayMs,
+    run_with_sleeps(NewShaper, NewHistory, NewDelay, TokensLeft - ConsumeNow).
+
+run_shaper(Shape, ToConsume) ->
+    Shaper = opuntia:create(Shape, 0),
+    run_shaper(Shaper, [], 0, ToConsume).
+
+run_shaper(Shaper, History, AccumulatedDelay, 0) ->
+    {Shaper, lists:reverse(History), AccumulatedDelay};
+run_shaper(Shaper, History, AccumulatedDelay, TokensLeft) ->
     %% Uniform distributes in [1, N], and we want [0, N], so we generate [1, N+1] and subtract 1
     ConsumeNow = rand:uniform(TokensLeft + 1) - 1,
-    {NewShaper, DelayMs} = opuntia:calculate(Shaper, ConsumeNow, Now),
-    true = DelayMs >= 0,
-    run_shaper(NewShaper, Now, [{ConsumeNow, DelayMs} | History], AccumulatedDelay + DelayMs, TokensLeft - ConsumeNow).
+    {NewShaper, DelayMs} = opuntia:calculate(Shaper, ConsumeNow, 0),
+    NewEvent = #{consumed => ConsumeNow, proposed_delay => DelayMs, final_shaper => NewShaper},
+    NewHistory = [NewEvent | History],
+    NewDelay = AccumulatedDelay + DelayMs,
+    NewToConsume = TokensLeft - ConsumeNow,
+    case is_integer(DelayMs) andalso DelayMs >= 0 of
+        true ->
+            run_shaper(NewShaper, NewHistory, NewDelay, NewToConsume);
+        false ->
+            {NewShaper, NewHistory, bad_delay}
+    end.
 
 run_prop(PropName, Property, NumTests, WorkersPerScheduler) ->
     Opts = [quiet, noshrink, {start_size, 1}, {numtests, NumTests},
