@@ -16,7 +16,7 @@
 -export([create/2, calculate/3, convert_time_unit/3]).
 -else.
 -compile({inline, [create/2, calculate/3, convert_time_unit/3, timediff_in_units/3,
-                   unbounded_bucket_diff/3, exactly_available_now/2, final_state/4]}).
+                   unbounded_available_tokens/3, exactly_available_tokens/2, final_state/4]}).
 -endif.
 
 -include("opuntia.hrl").
@@ -48,7 +48,7 @@
 
 -export_type([shaper/0, shape/0, tokens/0, bucket_size/0, rate/0, time_unit/0, delay/0]).
 
--define(NON_NEG_INT(N), (is_integer(N) andalso N > 0)).
+-define(POS_INTEGER(N), (is_integer(N) andalso N > 0)).
 -define(TU(T), (second =:= T orelse
                 millisecond =:= T orelse
                 microsecond =:= T orelse
@@ -103,8 +103,8 @@ create(#{bucket_size := MaximumTokens,
          time_unit := TimeUnit,
          start_full := StartFull},
        NativeNow)
-  when ?NON_NEG_INT(MaximumTokens),
-       ?NON_NEG_INT(Rate),
+  when ?POS_INTEGER(MaximumTokens),
+       ?POS_INTEGER(Rate),
        MaximumTokens >= Rate,
        ?TU(TimeUnit),
        is_boolean(StartFull) ->
@@ -129,9 +129,9 @@ calculate(#token_bucket_shaper{shape = {MaximumTokens, Rate, TimeUnit},
 
     TimeDiffInUnits = timediff_in_units(TimeUnit, NativeLastUpdate, NativeNow),
 
-    UnboundedTokenGrowth = unbounded_bucket_diff(Rate, LastAvailableTokens, TimeDiffInUnits),
+    UnboundedTokens = unbounded_available_tokens(Rate, LastAvailableTokens, TimeDiffInUnits),
 
-    ExactlyAvailableNow = exactly_available_now(MaximumTokens, UnboundedTokenGrowth),
+    ExactlyAvailableNow = exactly_available_tokens(MaximumTokens, UnboundedTokens),
 
     %% How many are available after using TokensNowUsed can't be smaller than zero
     TokensAvailable = max(0, ExactlyAvailableNow - TokensNowUsed),
@@ -159,18 +159,18 @@ timediff_in_units(TimeUnit, NativeLastUpdate, NativeNow) ->
 %% update even before we have reach the point in time where the previous `last_update' was set
 %%
 %% If the growth was negative, that means that it has grown the debt instead
--spec unbounded_bucket_diff(rate(), tokens(), float()) -> float().
-unbounded_bucket_diff(Rate, LastAvailableTokens, TimeDiffInUnits) ->
+-spec unbounded_available_tokens(rate(), tokens(), float()) -> float().
+unbounded_available_tokens(Rate, LastAvailableTokens, TimeDiffInUnits) ->
     %% How much we might have recovered since last time
     AvailableAtGrowthRate = Rate * TimeDiffInUnits,
     %% Unbounded growth at rate since the last update
     LastAvailableTokens + AvailableAtGrowthRate.
 
 %% This is the real growth considering the maximum bucket size.
--spec exactly_available_now(bucket_size(), float()) -> float().
-exactly_available_now(MaximumTokens, UnboundedTokenGrowth) ->
+-spec exactly_available_tokens(bucket_size(), float()) -> float().
+exactly_available_tokens(MaximumTokens, UnboundedTokens) ->
     %% Real recovery cannot grow higher than the actual rate in the window frame
-    ExactlyAvailableNow0 = min(MaximumTokens, UnboundedTokenGrowth),
+    ExactlyAvailableNow0 = min(MaximumTokens, UnboundedTokens),
     %% But it can't be negative either which can happen if we were already in debt,
     %% but this is a debt we will pay when we calculate the final punishment in final_state
     max(+0.0, ExactlyAvailableNow0).
@@ -181,17 +181,17 @@ exactly_available_now(MaximumTokens, UnboundedTokenGrowth) ->
 %% to the limits of the shaper delay.
 %%
 %% Two cases, either:
-%%   Punish is positive: even after paying the old debt you incurr a new debt again
+%%   Punish is positive: even after paying the old debt you incur a new debt again
 %%   Punish is negative: I overpenalised you last time, you get off now but with a future bill
 final_state(Shaper, TimeUnit, Punish, NativeNow) when Punish >= +0.0 ->
     DelayMs = convert_time_unit(Punish, TimeUnit, millisecond),
     RoundedDelayMs = ceil(DelayMs),
-    OverPenalisedNow = RoundedDelayMs - DelayMs,
-    OverUsedRateNowInUnits = convert_time_unit(OverPenalisedNow, millisecond, TimeUnit),
+    Debt = RoundedDelayMs - DelayMs,
+    DebtInUnits = convert_time_unit(Debt, millisecond, TimeUnit),
     DelayNative = convert_time_unit(RoundedDelayMs, TimeUnit, native),
     RoundedDelayNative = ceil(DelayNative),
     NewShaper = Shaper#token_bucket_shaper{last_update = NativeNow + RoundedDelayNative,
-                                           debt = OverUsedRateNowInUnits},
+                                           debt = DebtInUnits},
     {NewShaper, RoundedDelayMs};
 final_state(Shaper, TimeUnit, Punish, NativeNow) when Punish < +0.0 ->
     DebtInUnits = convert_time_unit(-Punish, millisecond, TimeUnit),
