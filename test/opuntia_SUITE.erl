@@ -319,7 +319,7 @@ run_shaper(Shaper, History, AccumulatedDelay, TokensLeft) ->
         true ->
             run_shaper(NewShaper, NewHistory, NewDelay, NewToConsume);
         false ->
-            {NewShaper, NewHistory, NewDelay, NewToConsume}
+            {NewShaper, NewHistory, bad_delay}
     end.
 
 run_prop(PropName, Property, NumTests, WorkersPerScheduler) ->
