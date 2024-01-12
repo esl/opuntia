@@ -91,6 +91,8 @@ new(Shape) ->
 -spec update(shaper(), tokens()) -> {shaper(), delay()}.
 update(none, _TokensNowUsed) ->
     {none, 0};
+update(Shaper, 0) ->
+    {Shaper, 0};
 update(Shaper, TokensNowUsed) ->
     calculate(Shaper, TokensNowUsed, erlang:monotonic_time()).
 
@@ -120,8 +122,6 @@ create(#{bucket_size := MaximumTokens,
 -spec calculate(shaper(), tokens(), integer()) -> {shaper(), delay()}.
 calculate(none, _, _) ->
     {none, 0};
-calculate(Shaper, 0, _) ->
-    {Shaper, 0};
 calculate(#token_bucket_shaper{shape = {MaximumTokens, Rate, TimeUnit},
                                available_tokens = LastAvailableTokens,
                                last_update = NativeLastUpdate,
