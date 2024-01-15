@@ -25,6 +25,7 @@ groups() ->
     [
      {throughput_throttle, [sequence],
       [
+       peek_available,
        simple_test_no_delay_is_needed,
        run_shaper_with_zero_does_not_shape,
        run_shaper_without_consuming_does_not_delay,
@@ -76,6 +77,17 @@ keep_table() ->
 %%%===================================================================
 %%% Individual Test Cases (from groups() definition)
 %%%===================================================================
+
+peek_available(_) ->
+    Prop = ?FORALL(Shape, shape(),
+              begin
+                  #{bucket_size := Size} = Shape,
+                  Shaper = opuntia:new(Shape#{start_full => true}),
+                  Peek = opuntia:peek(Shaper),
+                  Val = value_in_range(Peek, 0, Size),
+                  success_or_log_and_return(Val, "shape of ~p was actually requested", [Peek])
+              end),
+    run_prop(?FUNCTION_NAME, Prop, 100, 1).
 
 simple_test_no_delay_is_needed(_) ->
     Units = [second, millisecond, microsecond, nanosecond, native],
