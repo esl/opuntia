@@ -10,6 +10,6 @@
   {env,[]},
   {doc, "doc"},
   {modules, []},
-  {licenses, ["Apache 2.0"]},
+  {licenses, ["Apache-2.0"]},
   {links, [{"GitHub", "https://github.com/esl/opuntia/"}]}
  ]}.
