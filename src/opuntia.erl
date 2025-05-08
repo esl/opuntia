@@ -46,7 +46,7 @@
 -type shaper() :: none | #token_bucket_shaper{}.
 %% Shaper type
 
--export_type([shaper/0, shape/0, tokens/0, bucket_size/0, rate/0, time_unit/0, delay/0]).
+-export_type([config/0, shaper/0, shape/0, tokens/0, bucket_size/0, rate/0, time_unit/0, delay/0]).
 
 -define(POS_INTEGER(N), (is_integer(N) andalso N > 0)).
 -define(TU(T), (second =:= T orelse
