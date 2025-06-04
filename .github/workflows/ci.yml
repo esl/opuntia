@@ -13,9 +13,9 @@ jobs:
     name: OTP ${{matrix.otp_vsn}}
     strategy:
       matrix:
-        otp_vsn: ['26.2', '25.3', '24.3']
-        rebar_vsn: ['3.22.0']
-    runs-on: 'ubuntu-22.04'
+        otp_vsn: ['28', '27', '26']
+        rebar_vsn: ['3.25.0']
+    runs-on: 'ubuntu-24.04'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,7 +32,7 @@ jobs:
           restore-keys: ${{ runner.os }}-build-${{ matrix.otp_vsn }}-1-
       - run: rebar3 as test compile
       - run: rebar3 do xref, dialyzer
-        if: ${{ matrix.otp_vsn == '26.1' }}
+        if: ${{ matrix.otp_vsn == '28' }}
       - run: rebar3 do ct --cover
       - run: rebar3 as test codecov analyze
       - uses: codecov/codecov-action@v3
