@@ -26,3 +26,11 @@ Allowed = opuntia:peek(Shaper),
 consume_tokens(Allowed),
 {NewShaper, 0} = opuntia:update(Shaper), %% Will suggest no delay if you were diligent and consume less that adviced
 ```
+
+## Releasing to Hex.pm
+
+Creating a GitHub release (non-draft, non-prerelease) automatically publishes the package to [Hex.pm](https://hex.pm/) via the **Publish to Hex** workflow.
+This workflow can also be triggered manually from the Actions tab — make sure to run it from the specific tag you want to publish.
+
+To revert a published version, run the **Revert published version from Hex** workflow from the Actions tab, providing the version to revert.
+Hex.pm only allows reverting within 1 hour of publishing — after that, the version can only be *retired*.
